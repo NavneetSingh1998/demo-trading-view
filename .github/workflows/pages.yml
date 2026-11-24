@@ -1,0 +1,38 @@
+# OPTIONAL: publishes Wickline (the public/ folder) to GitHub Pages as a free static site.
+# Off by default. To use it: Settings → Pages → Source: "GitHub Actions", then run this workflow
+# from the Actions tab (or add `push` / `schedule` triggers below to deploy automatically,
+# e.g. schedule: cron '30 22 * * 1-5' to refresh the US stock lists after each US close).
+name: Deploy to GitHub Pages (optional)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # If Nasdaq can't be reached from GitHub's machines, the lists committed in the repo are used.
+      - name: Refresh US market lists
+        run: node scripts/update-data.mjs || echo "Using the market lists committed in the repo"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4

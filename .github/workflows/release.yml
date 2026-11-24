@@ -1,0 +1,81 @@
+# Builds the desktop app for Windows, macOS and Linux and attaches the installers to a
+# GitHub release. To release: set "version" in package.json (e.g. 0.2.0), commit, then
+#   git tag v0.2.0 && git push origin v0.2.0
+# A draft release appears under Releases with the files; review it and press Publish.
+#
+# Only the six downloads are attached, named for who they're for. GitHub lists release files
+# alphabetically, so the names put the Apple-silicon Mac and Windows builds first; the release
+# notes (.github/release-notes.md) open with a table of which file to pick.
+name: Build desktop apps
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # One draft release first, so the three build jobs below all upload to the same one
+  # instead of racing to create their own.
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the draft release (if it doesn't exist yet)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="$(node -p "require('./package.json').version")"
+          sed -e "s/{version}/$V/g" -e "s#{repo}#$GITHUB_REPOSITORY#g" .github/release-notes.md > notes.md
+          gh release view "v$V" >/dev/null 2>&1 || gh release create "v$V" --draft --title "Wickline v$V" --notes-file notes.md
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # No dependency cache: release builds start clean, so nothing another workflow left in the
+      # repo's Actions cache can end up in the installers.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm test
+      - name: Build
+        shell: bash
+        run: npx electron-builder --publish never
+        env:
+          # No paid Apple certificate: the Mac app is ad-hoc signed ("identity": "-" in package.json).
+          # Apple silicon refuses an app with no signature at all and calls it "damaged".
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Check the Mac apps are signed
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for app in dist/mac*/Wickline.app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'
+            echo "$app: signed"
+          done
+      - name: Attach the downloads to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="$(node -p "require('./package.json').version")"
+          cd dist
+          # Mac builds: name them by processor.
+          if [ -f "Wickline-Mac-arm64-$V.dmg" ]; then mv "Wickline-Mac-arm64-$V.dmg" "Wickline-for-Mac-Apple-Silicon-$V.dmg"; fi
+          if [ -f "Wickline-Mac-x64-$V.dmg" ]; then mv "Wickline-Mac-x64-$V.dmg" "Wickline-Intel-Mac-$V.dmg"; fi
+          # Only the downloads (not electron-builder's update metadata: latest*.yml, *.blockmap).
+          shopt -s nullglob
+          files=(*.exe *.dmg *.AppImage *.deb)
+          if [ ${#files[@]} -eq 0 ]; then echo "No build files found"; exit 1; fi
+          ls -l "${files[@]}"
+          gh release upload "v$V" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
